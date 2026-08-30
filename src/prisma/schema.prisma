@@ -1,0 +1,39 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+model ApprovalRequest {
+  id            String         @id @default(uuid())
+  correlationId String         @unique
+  title         String
+  amount        Decimal        @db.Decimal(14, 2)
+  requesterId   String
+  approverId    String
+  status        ApprovalStatus @default(PENDING)
+
+  // Set when a terminal decision is recorded. Used to reject late or
+  // duplicate callbacks rather than silently overwriting a decision.
+  decidedAt     DateTime?
+  decidedBy     String?
+
+  // Teams message identity, needed to update the card after a decision.
+  channelId     String?
+  messageId     String?
+
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([status])
+}
