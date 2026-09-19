@@ -1,6 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common'
-import { GraphClient, SentMessage } from './graph-client.interface'
-import { TokenService } from './token.service'
+import { Injectable, Logger } from '@nestjs/common';
+import { GraphClient, SentMessage } from './graph-client.interface.js';
+import { TokenService } from './token.service.js';
 
 const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 
@@ -17,7 +17,10 @@ export class LiveGraphClient implements GraphClient {
   ): Promise<SentMessage> {
     const teamId = process.env.TEAMS_TEAM_ID;
     const body = {
-      body: { contentType: 'html', content: '<attachment id="card"></attachment>' },
+      body: {
+        contentType: 'html',
+        content: '<attachment id="card"></attachment>',
+      },
       attachments: [
         {
           id: 'card',
@@ -37,7 +40,11 @@ export class LiveGraphClient implements GraphClient {
     return { channelId, messageId: res.id };
   }
 
-  async updateCard(channelId: string, messageId: string, card: unknown): Promise<void> {
+  async updateCard(
+    channelId: string,
+    messageId: string,
+    card: unknown,
+  ): Promise<void> {
     const teamId = process.env.TEAMS_TEAM_ID;
     await this.request(
       `${GRAPH_BASE}/teams/${teamId}/channels/${channelId}/messages/${messageId}`,
@@ -59,7 +66,12 @@ export class LiveGraphClient implements GraphClient {
    * transient 5xx during service degradation. Both are retryable; 4xx
    * other than 429 are not, and retrying them just wastes the token.
    */
-  private async request(url: string, method: string, body: unknown, attempt = 1): Promise<any> {
+  private async request(
+    url: string,
+    method: string,
+    body: unknown,
+    attempt = 1,
+  ): Promise<any> {
     const token = await this.tokens.getToken();
 
     const res = await fetch(url, {
@@ -76,7 +88,9 @@ export class LiveGraphClient implements GraphClient {
     const retryable = res.status === 429 || res.status >= 500;
     if (retryable && attempt < 4) {
       const retryAfter = Number(res.headers.get('Retry-After')) || 2 ** attempt;
-      this.logger.warn(`Graph ${res.status}, retrying in ${retryAfter}s (attempt ${attempt})`);
+      this.logger.warn(
+        `Graph ${res.status}, retrying in ${retryAfter}s (attempt ${attempt})`,
+      );
       await new Promise((r) => setTimeout(r, retryAfter * 1000));
       return this.request(url, method, body, attempt + 1);
     }

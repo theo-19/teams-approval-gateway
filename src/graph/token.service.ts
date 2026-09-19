@@ -1,5 +1,5 @@
-import { ConfidentialClientApplication } from '@azure/msal-node'
-import { Injectable, Logger } from '@nestjs/common'
+import { ConfidentialClientApplication } from '@azure/msal-node';
+import { Injectable, Logger } from '@nestjs/common';
 
 @Injectable()
 export class TokenService {
@@ -9,9 +9,9 @@ export class TokenService {
   constructor() {
     this.client = new ConfidentialClientApplication({
       auth: {
-        clientId: process.env.AZURE_CLIENT_ID,
-        authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
-        clientSecret: process.env.AZURE_CLIENT_SECRET,
+        clientId: required('AZURE_CLIENT_ID'),
+        authority: `https://login.microsoftonline.com/${required('AZURE_TENANT_ID')}`,
+        clientSecret: required('AZURE_CLIENT_SECRET'),
       },
     });
   }
@@ -31,4 +31,10 @@ export class TokenService {
     }
     return result.accessToken;
   }
+}
+
+function required(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing required env var: ${name}`);
+  return value;
 }
