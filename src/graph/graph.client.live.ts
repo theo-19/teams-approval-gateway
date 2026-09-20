@@ -1,4 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  TEAMS_APPROVAL_OPTIONS,
+  TeamsApprovalOptions,
+} from '../approvals/teams-approval.module.js';
 import { GraphClient, SentMessage } from './graph-client.interface.js';
 import { TokenService } from './token.service.js';
 
@@ -8,14 +12,18 @@ const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
 export class LiveGraphClient implements GraphClient {
   private readonly logger = new Logger(LiveGraphClient.name);
 
-  constructor(private readonly tokens: TokenService) {}
+  constructor(
+    private readonly tokens: TokenService,
+    @Inject(TEAMS_APPROVAL_OPTIONS)
+    private readonly options: TeamsApprovalOptions,
+  ) {}
 
   async sendApprovalCard(
     channelId: string,
     card: unknown,
     correlationId: string,
   ): Promise<SentMessage> {
-    const teamId = process.env.TEAMS_TEAM_ID;
+    const teamId = this.options.teamId;
     const body = {
       body: {
         contentType: 'html',
