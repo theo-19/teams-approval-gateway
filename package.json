@@ -1,10 +1,10 @@
 {
   "name": "teams-approval-gateway",
   "version": "0.0.1",
-  "description": "",
-  "author": "",
+  "description": "Reusable NestJS module for routing approval requests through Microsoft Teams via the Graph API. Idempotent decision handling for duplicate and late callbacks.",
+  "author": "Nael Alsaleh",
   "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "nest build",
