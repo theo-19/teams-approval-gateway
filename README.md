@@ -1,114 +1,153 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Teams Approval Gateway
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A reusable NestJS module that routes approval requests through Microsoft Teams,
+using the Graph API, and records the decisions in your own database.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## The problem
 
-## Description
+Organisations run approvals through an authority matrix: who can approve what, at
+which financial threshold, in which department. The routing part is straightforward.
+The hard part is where the approval actually happens.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+An in-app approval queue means people have to log into another system, which means
+they don't, and adoption dies. A third-party e-signature service handles the interface
+for you, but it costs per seat and adds another vendor relationship.
 
-## Project setup
+This module takes the third option: approvals happen in Teams, where staff already are.
 
-```bash
-$ yarn install
+## Why Teams
+
+At the organisation this was built for, the alternative in place was Adobe Sign —
+200 licences, roughly $40,000 a year. Teams was already paid for as part of an
+existing Microsoft 365 subscription, and staff already used it daily. Moving approvals
+into Teams retired those licences entirely, and required no new application, no
+adoption period, and no training.
+
+The trade-off was deliberate. A managed e-signature service handles token management,
+throttling, retries and callback delivery for you. Building on Graph means owning all
+of that: acquiring and caching tokens, honouring rate limits, and dealing with callbacks
+that arrive duplicated, late, or not at all. That complexity is the price of not paying
+per seat, and most of this repository is that complexity being handled.
+
+Decisions are stored in this service's own PostgreSQL database, not in Microsoft's.
+Teams is the interface; the database is the record, which is what an audit needs.
+
+## How it works
+
+Submitting a request writes a `PENDING` record **before** calling Graph. If the send
+fails or the process dies mid-call, there is a row to retry or reconcile rather than
+a card sitting in Teams that nothing in the system knows about.
+
+The record carries a `correlationId` — an opaque UUID that travels out embedded in the
+card's actions and comes back on the callback. It is the only link between a button
+press in Teams and a row in the database.
+
+When a decision arrives, the state transition is a single conditional update:
+
+```sql
+UPDATE approval_request
+SET status = 'APPROVED', decided_by = ..., decided_at = ...
+WHERE correlation_id = ... AND status = 'PENDING';
 ```
 
-## Compile and run the project
+The condition lives in the query, so the database decides atomically whether the
+transition is legal. Two callbacks arriving at the same instant are serialised by
+PostgreSQL: one matches a row, the other matches nothing. No read-then-write race,
+no lock.
 
-```bash
-# development
-$ yarn run start
+That is what makes the endpoint idempotent. Duplicate callbacks, late callbacks, and
+stale cards actioned an hour after the fact are all logged and discarded rather than
+overwriting a recorded decision. A duplicate callback returns **200**, not an error —
+it is expected traffic, and returning 4xx would only make Teams retry.
 
-# watch mode
-$ yarn run start:dev
+Once a decision is recorded the card is replaced with one that has no action buttons,
+so the stale-card case is closed at the interface as well as in the database.
 
-# production mode
-$ yarn run start:prod
+`decidedBy` is taken from the callback's authenticated identity, never from the card's
+data payload. Card data is client-controlled.
+
+## Design notes
+
+**The Graph integration sits behind an interface.** `GraphClient` declares two
+operations — send a card, update a card. There are two implementations: `LiveGraphClient`,
+which acquires a token through MSAL and calls Graph with retry handling, and
+`StubGraphClient`, which records calls in memory.
+
+`ApprovalService` depends on the interface and cannot tell which one it has. One config
+value decides:
+
+```typescript
+TeamsApprovalModule.forRoot({
+  tenantId,
+  clientId,
+  clientSecret,
+  teamId,
+  mode: 'stub', // or 'live'
+});
 ```
 
-## Run tests
+The consequence is that the entire approval flow — including the idempotency guarantee —
+is testable with no tenant, no network, and no flakiness. The test suite runs in
+milliseconds. Point `mode: 'live'` at a tenant with the permissions below and the same
+code path talks to Microsoft.
+
+**Configuration comes from the consumer.** The module takes its settings through
+`forRoot()` rather than reading `process.env` itself, so it does not force a particular
+configuration strategy on whoever uses it.
+
+**Authentication is the client credentials flow.** The service runs unattended, so it
+authenticates as itself rather than on behalf of a user. The `.default` scope means
+"whatever an administrator has already consented for this app" — with client credentials
+you cannot request permissions at runtime.
+
+**Retries distinguish retryable from non-retryable failures.** 429 and 5xx are retried
+with `Retry-After` honoured where Graph supplies it, exponential backoff where it does
+not, capped at four attempts. 4xx responses are not retried; retrying a malformed
+request only burns the rate limit.
+
+## Running it
 
 ```bash
-# unit tests
-$ yarn run test
-
-# e2e tests
-$ yarn run test:e2e
-
-# test coverage
-$ yarn run test:cov
+yarn install
+npx prisma migrate dev
+yarn start:dev
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+Tests run against the stub, so no configuration is needed:
 
 ```bash
-$ yarn install -g @nestjs/mau
-$ mau deploy
+yarn test
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+Docker:
 
-## Observability
+```bash
+docker build --platform linux/amd64 -t teams-approval-gateway .
+```
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+Note the explicit platform: building on an Apple Silicon machine otherwise produces a
+multi-platform image, which is considerably larger and will not match an x86 target.
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+## Graph permissions
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+Application permissions, admin consent required:
 
-## Resources
+`ChannelMessage.Send` · `Chat.ReadWrite.All` · `User.Read.All`
 
-Check out a few resources that may come in handy when working with NestJS:
+## Not implemented
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- **Delegation.** An approver on leave cannot hand a request to someone else. For audit
+  purposes a delegated decision needs to record both the delegate and the original
+  approver, which means a second identity on the decision record.
+- **Multi-step approval chains.** One approver per request. Routing a request through
+  a sequence, where each step is only visible once the previous one completes, is the
+  obvious next feature.
+- **Reconciliation for missing callbacks.** Duplicate and late callbacks are handled;
+  a callback that never arrives is not. A request can sit `PENDING` indefinitely. That
+  needs a background job polling Graph for message state.
+- **Jitter on retries.** Backoff is currently deterministic, so a batch of requests
+  throttled together will wake together and hit Graph as a spike. Randomising the delay
+  would spread them.
 
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Each of these matters in production. None is needed to demonstrate the routing and
+idempotency model, which is what this repository is for.
